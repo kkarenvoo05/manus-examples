@@ -1,0 +1,9 @@
+[project]
+name = "manus-examples"
+version = "0.1.0"
+description = "Manus glove streaming and visualization examples"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "websockets>=12",
+]

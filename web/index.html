@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Glove Viewer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #1a1a2e; color: #eee; font-family: monospace; overflow: hidden; }
+  #info {
+    position: absolute; top: 12px; left: 12px; z-index: 10;
+    background: rgba(0,0,0,0.6); padding: 8px 14px; border-radius: 6px;
+    font-size: 13px; line-height: 1.6;
+  }
+  #info .status { color: #f55; }
+  #info .status.ok { color: #5f5; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<div id="info">
+  <div>Status: <span id="status" class="status">connecting...</span></div>
+  <div>FPS: <span id="fps">0</span></div>
+  <div style="margin-top:4px;font-size:11px;color:#888">Drag to rotate &middot; Scroll to zoom</div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// --- Scene setup ---
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1a2e);
+
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.001, 10);
+camera.position.set(0, 0.15, 0.35);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0, 0.08);
+controls.enableDamping = true;
+controls.dampingFactor = 0.1;
+controls.update();
+
+// Lights
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(0.5, 1, 0.5);
+scene.add(dirLight);
+
+// Grid
+const grid = new THREE.GridHelper(0.4, 20, 0x444466, 0x333355);
+grid.rotation.x = Math.PI / 2;
+scene.add(grid);
+
+// Origin axes
+const axesHelper = new THREE.AxesHelper(0.03);
+scene.add(axesHelper);
+
+// --- Finger chains ---
+const CHAINS = [
+  [0,1,2,3,4],     // Thumb
+  [5,6,7,8,9],     // Index
+  [10,11,12,13,14], // Middle
+  [15,16,17,18,19], // Ring
+  [20,21,22,23,24], // Pinky
+];
+
+const FINGER_COLORS = [0xff4444, 0x44ff44, 0x4488ff, 0xffaa22, 0xff44ff];
+
+// --- Hand meshes ---
+function createHand(side) {
+  const group = new THREE.Group();
+  group.name = side;
+
+  // Joint spheres
+  const jointGeo = new THREE.SphereGeometry(0.003, 12, 12);
+  const joints = [];
+  for (let i = 0; i < 25; i++) {
+    const chainIdx = CHAINS.findIndex(c => c.includes(i));
+    const color = chainIdx >= 0 ? FINGER_COLORS[chainIdx] : 0xffffff;
+    const mesh = new THREE.Mesh(jointGeo, new THREE.MeshPhongMaterial({ color }));
+    group.add(mesh);
+    joints.push(mesh);
+  }
+
+  // Finger lines
+  const lines = [];
+  for (let ci = 0; ci < CHAINS.length; ci++) {
+    const geo = new THREE.BufferGeometry();
+    const positions = new Float32Array(CHAINS[ci].length * 3);
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    const mat = new THREE.LineBasicMaterial({ color: FINGER_COLORS[ci], linewidth: 2 });
+    const line = new THREE.Line(geo, mat);
+    group.add(line);
+    lines.push(line);
+  }
+
+  // Label
+  const canvas = document.createElement('canvas');
+  canvas.width = 128; canvas.height = 32;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = side === 'Left' ? '#44aaff' : '#ff6644';
+  ctx.font = 'bold 22px monospace';
+  ctx.fillText(side, 4, 24);
+  const tex = new THREE.CanvasTexture(canvas);
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }));
+  sprite.scale.set(0.06, 0.015, 1);
+  sprite.position.set(side === 'Left' ? 0.04 : -0.04, -0.02, 0);
+  group.add(sprite);
+
+  scene.add(group);
+  return { group, joints, lines };
+}
+
+const leftHand = createHand('Left');
+const rightHand = createHand('Right');
+
+// Offset hands so they don't overlap (left on left, right on right)
+leftHand.group.position.set(-0.08, 0, 0);
+rightHand.group.position.set(0.08, 0, 0);
+
+function updateHand(hand, keypoints) {
+  if (!keypoints) return;
+  for (let i = 0; i < 25; i++) {
+    const kp = keypoints[i];
+    hand.joints[i].position.set(kp[0], kp[1], kp[2]);
+  }
+  for (let ci = 0; ci < CHAINS.length; ci++) {
+    const posAttr = hand.lines[ci].geometry.getAttribute('position');
+    for (let j = 0; j < CHAINS[ci].length; j++) {
+      const idx = CHAINS[ci][j];
+      const kp = keypoints[idx];
+      posAttr.setXYZ(j, kp[0], kp[1], kp[2]);
+    }
+    posAttr.needsUpdate = true;
+  }
+}
+
+// --- WebSocket ---
+let latestData = null;
+const statusEl = document.getElementById('status');
+const fpsEl = document.getElementById('fps');
+
+function connectWS() {
+  const ws = new WebSocket(`ws://${location.hostname}:8765`);
+  ws.onopen = () => {
+    statusEl.textContent = 'connected';
+    statusEl.className = 'status ok';
+  };
+  ws.onmessage = (e) => { latestData = JSON.parse(e.data); };
+  ws.onclose = () => {
+    statusEl.textContent = 'disconnected';
+    statusEl.className = 'status';
+    setTimeout(connectWS, 1000);
+  };
+  ws.onerror = () => ws.close();
+}
+connectWS();
+
+// --- Render loop ---
+let frameCount = 0;
+let lastFpsTime = performance.now();
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+
+  if (latestData) {
+    updateHand(leftHand, latestData.left);
+    updateHand(rightHand, latestData.right);
+  }
+
+  renderer.render(scene, camera);
+
+  frameCount++;
+  const now = performance.now();
+  if (now - lastFpsTime >= 1000) {
+    fpsEl.textContent = frameCount;
+    frameCount = 0;
+    lastFpsTime = now;
+  }
+}
+animate();
+
+// --- Resize ---
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>

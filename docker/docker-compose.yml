@@ -1,0 +1,27 @@
+services:
+  manus-bridge:
+    # Pre-built image; if missing locally, compose will fall through to `build:`.
+    # Tag a locally-built docker-dex-dev image as rllg2-manus-bridge:latest to
+    # reuse the existing 10.6 GB build instead of triggering a 30+ min rebuild:
+    #   docker tag docker-dex-dev:latest rllg2-manus-bridge:latest
+    image: rllg2-manus-bridge:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        USERNAME: ${USER:-user}
+        USER_UID: ${UID:-1000}
+        USER_GID: ${GID:-100}
+    container_name: rllg2-manus-bridge
+    stdin_open: true
+    tty: true
+    privileged: true
+    volumes:
+      - /dev:/dev
+      - /run/udev:/run/udev:ro
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    environment:
+      - DISPLAY=${DISPLAY:-:0}
+      - QT_X11_NO_MITSHM=1
+    network_mode: host
+    command: ["sleep", "infinity"]
