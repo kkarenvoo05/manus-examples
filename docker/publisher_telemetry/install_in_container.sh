@@ -25,8 +25,10 @@ in_container() {
 }
 
 if ! "${DOCKER[@]}" inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q true; then
-    echo "Container '$CONTAINER' is not running. Pass its name: $0 <container>" >&2
-    "${DOCKER[@]}" ps --format '  {{.Names}}  ({{.Image}})' >&2 || true
+    echo "Container '$CONTAINER' is not running. Containers on this machine:" >&2
+    "${DOCKER[@]}" ps -a --format '  {{.Names}}  [{{.Status}}]  ({{.Image}})' >&2 || true
+    echo "Start a stopped one with '${DOCKER[*]} start <name>', or the repo's bridge with" >&2
+    echo "'./run.sh bridge' (container rllg2-manus-bridge), then run: $0 <name>" >&2
     exit 1
 fi
 
