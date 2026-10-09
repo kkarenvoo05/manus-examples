@@ -50,11 +50,16 @@ RUN wget -q https://static.manus-meta.com/resources/manus_core_3/sdk/MANUS_Core_
     && unzip /tmp/manus_sdk.zip -d /opt/manus_sdk \
     && rm /tmp/manus_sdk.zip
 
+# Timing/connection telemetry hooks for the publisher (/manus_telemetry topic).
+# See publisher_telemetry/ and the README; glove topics are unchanged.
+COPY publisher_telemetry /opt/manus_publisher_telemetry
+
 # Build Manus ROS2 package with integrated SDK (no external Manus Core needed)
 RUN mkdir -p /opt/ros2_ws/src \
     && cp -r /opt/manus_sdk/*/ROS2/* /opt/ros2_ws/src/ \
     && sed -i 's|^target_link_libraries(manus_data_publisher ManusSDK ncurses)|#target_link_libraries(manus_data_publisher ManusSDK ncurses)|; s|^#target_link_libraries(manus_data_publisher ManusSDK_Integrated ncurses)|target_link_libraries(manus_data_publisher ManusSDK_Integrated ncurses)|' /opt/ros2_ws/src/manus_ros2/CMakeLists.txt \
     && sed -i 's|^set(LIBRARY_FILE ${LIBRARY_DIR}/libManusSDK.so)|#set(LIBRARY_FILE ${LIBRARY_DIR}/libManusSDK.so)|; s|^#set(LIBRARY_FILE ${LIBRARY_DIR}/libManusSDK_Integrated.so)|set(LIBRARY_FILE ${LIBRARY_DIR}/libManusSDK_Integrated.so)|' /opt/ros2_ws/src/manus_ros2/CMakeLists.txt \
+    && python3 /opt/manus_publisher_telemetry/apply_patch.py /opt/ros2_ws/src/manus_ros2 \
     && /bin/bash -c "source /opt/ros/humble/setup.bash && cd /opt/ros2_ws && colcon build" \
     && chmod -R 777 /opt/ros2_ws
 

@@ -70,6 +70,72 @@ client.close()
 `manus_glove.start_manus_bridge()` brings the docker bridge up from Python and
 tears it down at exit.
 
+## Publisher telemetry: explaining gaps and finger twitches
+
+The stock MANUS publisher re-sends its latest cached pose on a fixed 120 Hz
+timer, and never publishes connection state, signal strength or SDK timestamps.
+`docker/publisher_telemetry/` patches it to also publish **`/manus_telemetry`**
+(batched JSON in `std_msgs/String`, every 50 ms). The glove topics are unchanged,
+so the viewer and existing bags/tools keep working. Tested against the ROS2
+package in MANUS SDK 3.1.1 (this Dockerfile) and 3.2.1.
+
+What it records (clocks: `mono` = steady_clock, `unix` = system clock, ns):
+
+| record | when | contents |
+|---|---|---|
+| `skel` / `ergo` / `raw` | every SDK callback, per glove | SDK `publishTime` (raw and Unix ms), per-glove sequence |
+| `land` | device list change, and ≥1 Hz | per glove: paired state, `tx_strength` (signal strength, raw SDK units), battery, `lastSeen`, IMU calibration; per dongle: radio channel, firmware |
+| `sys` | SDK system message | e.g. `LibDebugRxStall`, `LibDebugTxStall`, `LibDebugReplugDongle` |
+| `log`, `connect`, `disconnect` | SDK log/connection callbacks | text and host |
+| `tick` | every publish-timer run | duration, which gloves were published |
+| `pub` | every glove message | topic sequence, SDK `publishTime`, `fresh` (new SDK skeleton vs re-sent cache), SDK updates since last publish, pose hash |
+
+Every batch header also carries the publisher pid/host/boot, patch hash and
+callback registration codes, and an empty batch is still sent as a heartbeat.
+
+### On the glove machine
+
+```bash
+git pull                                              # this branch
+docker/publisher_telemetry/install_in_container.sh manus-bridge-arm64
+tools/record_glove_take.sh take_001 manus-bridge-arm64   # Ctrl+C to stop
+python3 tools/diagnose_glove_telemetry.py ~/manus-recordings/take_001/bag \
+    --kernel-log ~/manus-recordings/take_001/kernel.log
+```
+
+`install_in_container.sh` copies the patch into the running container, applies
+it to `/opt/ros2_ws/src/manus_ros2` (set `WS` if elsewhere), rebuilds that
+package, restarts `manus_data_publisher` (log: `/tmp/manus_data_publisher.log`
+in the container) and waits for `/manus_telemetry`. Re-run it after pulling
+updates or recreating the container; `REVERT=1` restores the stock publisher.
+New images built from `docker/Dockerfile` include the patch.
+
+`record_glove_take.sh` records both glove topics and `/manus_telemetry` into one
+bag and saves, next to it, the kernel log (`sudo dmesg`: USB/dongle disconnects),
+publisher and container logs, `ros2 bag info`, and a host snapshot (USB tree,
+processes such as `glove_bridge` that add CPU load). Output goes to
+`~/manus-recordings/<take>/`. `CAPTURE_SYNC=<session_id>` also runs
+`tools/record_capture_sync.py` on the same topics.
+
+`diagnose_glove_telemetry.py` (numpy only) pairs every bag message with its
+publish record by pose hash and writes `diagnosis.json` and `events.csv`:
+
+- **gap**: no message for a glove for >100 ms; **stale**: messages kept arriving
+  but the SDK pose did not change for >100 ms; **twitch**: a fingertip moved
+  >0.03 native units between messages.
+- labels: `radio_disconnect`, `sdk_stalled`, `publisher_stalled`,
+  `transport_recorder_stalled`, `host_stalled`, `in_stream_pose` (a twitch the
+  SDK itself produced with clean delivery: sensing, solver, fit or
+  interference), or `unclassified`. The decision rules are at the top of the
+  script. Bags without telemetry are still scanned, with every event
+  `unclassified`.
+
+Signal strength has no documented unit in the SDK, so compare it across
+conditions (dongle close vs far, wired vs wireless) rather than against an
+absolute threshold. `tests/test_publisher_telemetry.py` drives the real
+telemetry code through one injected fault of each kind; it needs
+`MANUS_SDK_INCLUDE=<SDK>/ROS2/ManusSDK/include`.
+
 ## Capture synchronization telemetry (first implementation)
 
 `tools/record_capture_sync.py` subscribes directly to ROS topics and preserves
@@ -78,9 +144,9 @@ telemetry. Run it alongside `ros2 bag record` to retain normal bag playback.
 This is not a rosbag replacement and does not recover sensor capture times.
 It does not use the TCP viewer or its latest-frame cache.
 
-The installed MANUS 3.2.1 publisher is not in this repository. Until that source
-is instrumented or its existing fields are mapped, SDK timestamps, frame IDs,
-device IDs and SDK callback times remain null. Recorder sequences count received
+`ManusGlove` carries no timestamps, frame IDs or device IDs, so those fields in
+this recorder's output stay null; the SDK-side values are on `/manus_telemetry`
+(see Publisher telemetry above). Recorder sequences count received
 messages; they cannot prove there were no upstream drops. A recorder epoch is
 not a device reconnect epoch. No clock synchronization is claimed by this tool.
 
@@ -162,13 +228,11 @@ sensor time without checking how the publisher constructs it. Do not assign
 left/right based only on topic index. Include SDK/firmware versions, calibration,
 skeleton topology, units and axes in metadata when known.
 
-To finish SDK instrumentation, obtain the installed publisher sources from
-`/opt/ros2_ws/src` in the actual 3.2.1 container. At each SDK callback entry,
-record host monotonic/Unix times; preserve original SDK timestamps, their meaning
-and units, source IDs and reset epochs through the ROS message. Skeleton and
-ergonomics need separate source times if delivered by separate callbacks. This
-requires reviewing and rebuilding that installed ROS package, not guessing
-fields based on this fork's older Dockerfile.
+SDK-side times, device IDs and connection state now come from
+`/manus_telemetry` (see Publisher telemetry above) rather than from fields in
+`ManusGlove`, which has none. Record that topic too (`--topics /manus_glove_0
+/manus_glove_1 /manus_telemetry`); its `pub` records carry the pose hash that
+pairs them with glove messages.
 
 Offline body/hand alignment should produce an explicit shared timeline with
 clock-mapping provenance. The markerless-mocap SOMA exporter accepts that timeline
