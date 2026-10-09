@@ -60,12 +60,34 @@ if [[ "${RESTART:-1}" != 1 ]]; then
 fi
 
 echo "Restarting manus_data_publisher ..."
-"${DOCKER[@]}" exec -u root "$CONTAINER" bash -c "pkill -INT -f '[l]ib/manus_ros2/manus_data_publisher' || true; sleep 2; pkill -KILL -f '[l]ib/manus_ros2/manus_data_publisher' || true"
-"${DOCKER[@]}" exec -d "${USER_ARGS[@]}" "$CONTAINER" bash -c \
-    "source /opt/ros/humble/setup.bash && source '$WS/install/setup.bash' && exec ros2 run manus_ros2 manus_data_publisher > /tmp/manus_data_publisher.log 2>&1"
+# If the container's main process is (or launches) the publisher, killing the
+# publisher stops the container; restart the container so its own command runs
+# the rebuilt binary instead.
+LOG_CMD="tail -20 /tmp/manus_data_publisher.log"
+MAIN="$("${DOCKER[@]}" exec "$CONTAINER" bash -c "tr '\\0' ' ' < /proc/1/cmdline" || true)"
+if [[ "$MAIN" == *manus* || "$MAIN" == *ros2* ]]; then
+    echo "Container main process is '$MAIN'; restarting the container."
+    "${DOCKER[@]}" restart -t 10 "$CONTAINER" > /dev/null
+    LOG_CMD=""
+else
+    "${DOCKER[@]}" exec -u root "$CONTAINER" bash -c "pkill -INT -f '[l]ib/manus_ros2/manus_data_publisher' || true; sleep 2; pkill -KILL -f '[l]ib/manus_ros2/manus_data_publisher' || true" || true
+    if ! "${DOCKER[@]}" inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q true; then
+        echo "The container stopped with the publisher; starting it again."
+        "${DOCKER[@]}" start "$CONTAINER" > /dev/null
+        LOG_CMD=""
+    else
+        "${DOCKER[@]}" exec -d "${USER_ARGS[@]}" "$CONTAINER" bash -c \
+            "source /opt/ros/humble/setup.bash && source '$WS/install/setup.bash' && exec ros2 run manus_ros2 manus_data_publisher > /tmp/manus_data_publisher.log 2>&1"
+    fi
+fi
+publisher_log() {
+    if [[ -n "$LOG_CMD" ]]; then in_container "$LOG_CMD"; else "${DOCKER[@]}" logs --tail 20 "$CONTAINER" 2>&1; fi
+}
+LOG_WHERE="/tmp/manus_data_publisher.log in the container"
+[[ -z "$LOG_CMD" ]] && LOG_WHERE="${DOCKER[*]} logs $CONTAINER"
 
 if [[ "${REVERT:-0}" == 1 ]]; then
-    echo "Reverted to the stock publisher (log: /tmp/manus_data_publisher.log in the container)."
+    echo "Reverted to the stock publisher (log: $LOG_WHERE)."
     exit 0
 fi
 
@@ -73,9 +95,9 @@ echo "Waiting for /manus_telemetry ..."
 if in_container "source /opt/ros/humble/setup.bash && source '$WS/install/setup.bash' && \
         timeout 30 ros2 topic echo --once --field data /manus_telemetry | head -c 400"; then
     echo
-    echo "OK: /manus_telemetry is publishing. Publisher log: /tmp/manus_data_publisher.log in the container."
+    echo "OK: /manus_telemetry is publishing. Publisher log: $LOG_WHERE."
 else
     echo "No /manus_telemetry message within 30 s. Check the publisher log:" >&2
-    in_container "tail -20 /tmp/manus_data_publisher.log" >&2 || true
+    publisher_log >&2 || true
     exit 1
 fi
